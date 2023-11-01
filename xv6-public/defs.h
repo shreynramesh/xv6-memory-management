@@ -1,3 +1,6 @@
+#include <stddef.h>  
+#include <sys/types.h> 
+
 struct buf;
 struct context;
 struct file;
@@ -86,6 +89,10 @@ void            initlog(int dev);
 void            log_write(struct buf*);
 void            begin_op();
 void            end_op();
+
+// mmap.c
+void*             mmap(void *addr, int length, int prot, int flags, int fd, int offset);
+int               munmap(void *addr, int length);
 
 // mp.c
 extern int      ismp;

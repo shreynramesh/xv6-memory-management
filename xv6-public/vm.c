@@ -6,6 +6,7 @@
 #include "mmu.h"
 #include "proc.h"
 #include "elf.h"
+#include "mmap.h"
 
 extern char data[];  // defined by kernel.ld
 pde_t *kpgdir;  // for use in scheduler()
@@ -32,7 +33,7 @@ seginit(void)
 // Return the address of the PTE in page table pgdir
 // that corresponds to virtual address va.  If alloc!=0,
 // create any required page table pages.
-static pte_t *
+pte_t *
 walkpgdir(pde_t *pgdir, const void *va, int alloc)
 {
   pde_t *pde;
@@ -57,7 +58,7 @@ walkpgdir(pde_t *pgdir, const void *va, int alloc)
 // Create PTEs for virtual addresses starting at va that refer to
 // physical addresses starting at pa. va and size might not
 // be page-aligned.
-static int
+int
 mappages(pde_t *pgdir, void *va, uint size, uint pa, int perm)
 {
   char *a, *last;
@@ -384,6 +385,111 @@ copyout(pde_t *pgdir, uint va, void *p, uint len)
   }
   return 0;
 }
+
+void* mmap(void *addr, int length, int prot, int flags, int fd, int offset) {
+    // cprintf("DEBUG: In mmap\n");
+    // Invalid arguements
+    if (!(flags & MAP_PRIVATE) && !(flags & MAP_SHARED)) {
+      return (void*) -1;
+    }
+    
+    struct proc* p = myproc();
+    struct VMA* vma = 0;
+
+    if(flags & MAP_ANON) {
+        if(flags & MAP_FIXED) {
+          // Address can only be between these 2 constants and should be a multiple of PGSIZE
+          if((int) addr < MMAPBASE || (int) addr > KERNBASE || (int) addr % PGSIZE != 0) {
+            return (void*) -1;
+          }
+          
+          // Checking for overlap between mapped regions
+          for(int i = 0; i > 32; i++) {
+            if(p->vma[i].used && ((int) addr > p->vma[i].addr && (int) addr < PGROUNDUP(p->vma[i].addr + length))) {
+              return (void*) -1;
+            }
+          }
+
+          // Finding free spot in vma list to place new vma
+          for(int i = 0; i < 32; i++) {
+            if(p->vma[i].used == 0) {
+              vma = &(p->vma[i]);
+              break;
+            }
+          }
+        }
+
+        // Allocating vma 
+        if(vma != 0) {
+          // cprintf("DEBUG: Memory Allocated\n");
+          vma->addr = (int) addr;
+          vma->length = length;
+          vma->prot = prot;
+          vma->flags = flags;
+          vma->offset = 0;
+          vma->used = 1;
+          p->num_mmaps++;
+
+          // ALlocate the memory
+          void* mem = kalloc();
+          if(mem == 0) {
+            return (void*) -1;
+          }
+
+          memset(mem,0,PGSIZE);
+          int perm = vma->prot | PTE_U;
+
+          // cprintf("DEBUG: About to allocate, Addr: %p, length: %d\n", (void*)addr, length);
+          if(mappages(p->pgdir, addr, length, V2P(mem), perm) < 0) {
+            kfree(mem);
+            return (void*) -1; 
+          }
+        } else { // Too many maps
+          return (void*) -1;
+        }
+    }
+
+    return addr;
+}
+int munmap(void *addr, int length)
+{
+    // Making sure address is valid
+    if((int) addr < MMAPBASE || (int) addr > KERNBASE || (int) addr % PGSIZE != 0) {
+      return -1;
+    }
+
+    int a, last, pa;
+    pte_t *pte;
+    struct proc* p = myproc();
+
+    a = PGROUNDDOWN((uint)addr);
+    last = PGROUNDDOWN(((uint)addr) + length - 1);
+
+    // cprintf("DEBUG: a: %p last: %p\n", (void*)a, (void*)last);
+
+    // Finding which vma we are removing mappings from
+    for(int i = 0; i < 32; i++) {
+      if((uint) addr >= p->vma[i].addr && (uint) addr <= (uint)(p->vma[i].addr + p->vma[i].length - 1)) {
+        for(; a <= last; a += PGSIZE) {
+          // Removing page mapping
+          pte = walkpgdir(p->pgdir, (char*)a, 0);
+          if(!pte) {
+            return -1;
+          } else if((*pte & PTE_P) != 0) {
+            pa = PTE_ADDR(*pte); // Extract the physical address from the PTE
+            if (pa == 0) {
+              panic("munmap"); // This should not happen; panic if it does
+            }
+            char *v = P2V(pa); // Map the physical address to a kernel virtual address
+            kfree(v); // Free the kernel memory associated with the page
+            *pte = 0; // Clear the page table entry to mark it as unused
+          }
+        }
+      }
+    }
+    return 0;
+}
+
 
 //PAGEBREAK!
 // Blank page.

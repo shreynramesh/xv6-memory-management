@@ -89,3 +89,41 @@ sys_uptime(void)
   release(&tickslock);
   return xticks;
 }
+
+int
+sys_mmap(void)
+{
+  int addr;
+  int prot, flags, fd;
+  int length;
+  int offset;
+  
+  // Integer arguements
+	if(argint(1, &length) < 0 || argint(2, &prot) < 0 || argint(3, &flags) < 0 || argint(5, &offset) < 0) {
+		return -1;
+	}
+  // Pointer arguement
+	if(argint(0, &addr) < 0) {
+		return -1;
+	}
+	// File descriptor arguement
+	if(argint(4, &fd) < 0) {
+		return -1;
+	}
+
+  return (int) mmap((void*) addr, length, prot, flags, fd, offset);
+}
+
+int
+sys_munmap(void)
+{
+  int addr;
+  size_t length;
+
+  // Integer arguement
+	if(argint(0, &addr) < 0 || argint(1, (int*) &length) < 0) {
+		return -1;
+	}
+
+  return (int) munmap((void*) addr, length);
+}

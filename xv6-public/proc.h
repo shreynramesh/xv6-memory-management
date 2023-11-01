@@ -34,6 +34,18 @@ struct context {
 
 enum procstate { UNUSED, EMBRYO, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
 
+// Virtual Memory Area
+struct VMA {
+  int addr; // start address
+  int length  ; // end of vma after rounded up to page
+  int prot; // protection
+  int flags; // map shared or private
+  int fd; // file descriptor
+  int offset; // offset into file, always = 0
+  struct file *pf; // pointer to file struct
+  int used; // present bit
+};
+
 // Per-process state
 struct proc {
   uint sz;                     // Size of process memory (bytes)
@@ -49,6 +61,8 @@ struct proc {
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
+  int num_mmaps;               // Number of regions mapped by this process
+  struct VMA vma[32];          // mmap memory allocated to process
 };
 
 // Process memory is laid out contiguously, low addresses first:
