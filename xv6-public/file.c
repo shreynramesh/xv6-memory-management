@@ -155,3 +155,7 @@ filewrite(struct file *f, char *addr, int n)
   panic("filewrite");
 }
 
+void resetfileoff(struct file* f) {
+  f->off = 0;
+}
+

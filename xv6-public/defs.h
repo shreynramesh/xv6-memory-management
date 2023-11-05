@@ -7,6 +7,7 @@ struct file;
 struct inode;
 struct pipe;
 struct proc;
+struct VMA;
 struct rtcdate;
 struct spinlock;
 struct sleeplock;
@@ -36,6 +37,7 @@ void            fileinit(void);
 int             fileread(struct file*, char*, int n);
 int             filestat(struct file*, struct stat*);
 int             filewrite(struct file*, char*, int n);
+void            resetfileoff(struct file* f);
 
 // fs.c
 void            readsb(int dev, struct superblock *sb);
@@ -89,10 +91,6 @@ void            initlog(int dev);
 void            log_write(struct buf*);
 void            begin_op();
 void            end_op();
-
-// mmap.c
-void*             mmap(void *addr, int length, int prot, int flags, int fd, int offset);
-int               munmap(void *addr, int length);
 
 // mp.c
 extern int      ismp;
@@ -192,6 +190,11 @@ void            switchuvm(struct proc*);
 void            switchkvm(void);
 int             copyout(pde_t*, uint, void*, uint);
 void            clearpteu(pde_t *pgdir, char *uva);
+void*           mmap(void *addr, int length, int prot, int flags, int fd, int offset);
+int             munmap(void *addr, int length);
+int             findva(struct VMA* vma, int length, int growsup);
+uint *          walkpgdir(pde_t *pgdir, const void *va, int alloc);
+int             mappages(pde_t *pgdir, void *va, uint size, uint pa, int perm);
 
 // number of elements in fixed-size array
 #define NELEM(x) (sizeof(x)/sizeof((x)[0]))

@@ -261,7 +261,7 @@ deallocuvm(pde_t *pgdir, uint oldsz, uint newsz)
 
   if(newsz >= oldsz)
     return oldsz;
-
+  
   a = PGROUNDUP(newsz);
   for(; a  < oldsz; a += PGSIZE){
     pte = walkpgdir(pgdir, (char*)a, 0);
@@ -310,6 +310,43 @@ clearpteu(pde_t *pgdir, char *uva)
     panic("clearpteu");
   *pte &= ~PTE_U;
 }
+
+int isoverlap(int a, int length, struct VMA* vma) {
+  int end = PGROUNDUP(a + length - 1);
+
+  for(int i = 0; i < 32; i++) {
+    if(vma[i].used) {
+      // cprintf("Debug: vma start: %p, end: %p; a start: %p, end: %p\n", vma[i].addr, PGROUNDUP(vma[i].addr + length - 1), a, PGROUNDUP(a + length - 1));
+
+      // Checking for overlapping VMAs
+      int addr_end = PGROUNDUP(vma[i].addr + length - 1);
+      if(((a > vma[i].addr && a < addr_end) || (end > vma[i].addr && end < addr_end) || (a < vma[i].addr && end > addr_end))) {
+        return 1;
+      }
+    }
+  }
+  return 0;
+}
+
+int findva(struct VMA* vma, int length, int growsup) {
+  // cprintf("Starting findva()...\n");
+  for(int a = MMAPBASE; a <= KERNBASE - length; a += PGSIZE) {
+    if(growsup) {
+      if(!isoverlap(a, length + PGSIZE, vma)) {
+        // cprintf("Selected address: %p\n", (void*)a);
+        return a;
+      }
+    } else {
+      if(!isoverlap(a, length, vma)) {
+        // cprintf("Selected address: %p\n", (void*)a);
+        return a;
+      }
+    } 
+  }
+  // cprintf("Ending findva()...\n");
+  return -1;
+}
+
 
 // Given a parent process's page table, create a copy
 // of it for a child.
@@ -395,64 +432,77 @@ void* mmap(void *addr, int length, int prot, int flags, int fd, int offset) {
     
     struct proc* p = myproc();
     struct VMA* vma = 0;
+    int growsup = flags & MAP_GROWSUP;
 
-    if(flags & MAP_ANON) {
-        if(flags & MAP_FIXED) {
-          // Address can only be between these 2 constants and should be a multiple of PGSIZE
-          if((int) addr < MMAPBASE || (int) addr > KERNBASE || (int) addr % PGSIZE != 0) {
-            return (void*) -1;
-          }
-          
-          // Checking for overlap between mapped regions
-          for(int i = 0; i > 32; i++) {
-            if(p->vma[i].used && ((int) addr > p->vma[i].addr && (int) addr < PGROUNDUP(p->vma[i].addr + length))) {
-              return (void*) -1;
-            }
-          }
+    if(flags & MAP_FIXED) {
+      // Address can only be between these 2 constants and should be a multiple of PGSIZE
+      if((int) addr < MMAPBASE || (int) addr > KERNBASE || (int) addr % PGSIZE != 0) {
+        return (void*) -1;
+      }
+      
+      // Checking for overlap between mapped regions
+      if(isoverlap((int) addr, length, p->vma)) {
+        return (void*)-1;
+      }
 
-          // Finding free spot in vma list to place new vma
-          for(int i = 0; i < 32; i++) {
-            if(p->vma[i].used == 0) {
-              vma = &(p->vma[i]);
-              break;
-            }
-          }
+    } else {
+      if((addr = (void*)findva(p->vma, length, growsup)) < 0) {
+        return (void*) -1;
+      }
+    }
+
+    // Finding free spot in vma list to place new vma
+    for(int i = 0; i < 32; i++) {
+      if(p->vma[i].used == 0) {
+        vma = &(p->vma[i]);
+        break;
+      }
+    }
+
+    // Allocating vma 
+    if(vma != 0) {
+      // cprintf("DEBUG: Memory Allocated\n");
+      vma->addr = (int) addr;
+      vma->length = length;
+      vma->prot = prot;
+      vma->flags = flags;
+      vma->fd = fd;
+      vma->offset = 0;
+      vma->used = 1;
+      p->num_mmaps++;
+
+      // ALlocate the memory
+      void* mem = kalloc();
+      if(mem == 0) {
+        return (void*) -1;
+      }
+
+      memset(mem,0,PGSIZE);
+      int perm = vma->prot | PTE_U;
+
+      // cprintf("mmap Allocating: va start: %p, end: %p pa start: %p end: %p\n", (void*) addr, (void*) addr + length, (void*) V2P(mem), (void*) V2P(mem) + length);
+      if(mappages(p->pgdir, addr, length, V2P(mem), perm) < 0) {
+        kfree(mem);
+        return (void*) -1; 
+      }
+
+      // Writing file to memory
+      if(!(flags & MAP_ANON)) {
+        // cprintf("DEBUG mmap: %p %d %d %p\n", (char*) addr, fd, length, p->ofile[fd]);
+        if (p->ofile[fd]) {
+          resetfileoff(p->ofile[fd]);
+          fileread(p->ofile[fd], mem, length);
         }
-
-        // Allocating vma 
-        if(vma != 0) {
-          // cprintf("DEBUG: Memory Allocated\n");
-          vma->addr = (int) addr;
-          vma->length = length;
-          vma->prot = prot;
-          vma->flags = flags;
-          vma->offset = 0;
-          vma->used = 1;
-          p->num_mmaps++;
-
-          // ALlocate the memory
-          void* mem = kalloc();
-          if(mem == 0) {
-            return (void*) -1;
-          }
-
-          memset(mem,0,PGSIZE);
-          int perm = vma->prot | PTE_U;
-
-          // cprintf("DEBUG: About to allocate, Addr: %p, length: %d\n", (void*)addr, length);
-          if(mappages(p->pgdir, addr, length, V2P(mem), perm) < 0) {
-            kfree(mem);
-            return (void*) -1; 
-          }
-        } else { // Too many maps
-          return (void*) -1;
-        }
+      }
+    } else { // Too many maps
+      return (void*) -1;
     }
 
     return addr;
 }
 int munmap(void *addr, int length)
 {
+    // cprintf("Starting munmap...\n");
     // Making sure address is valid
     if((int) addr < MMAPBASE || (int) addr > KERNBASE || (int) addr % PGSIZE != 0) {
       return -1;
@@ -469,14 +519,27 @@ int munmap(void *addr, int length)
 
     // Finding which vma we are removing mappings from
     for(int i = 0; i < 32; i++) {
-      if((uint) addr >= p->vma[i].addr && (uint) addr <= (uint)(p->vma[i].addr + p->vma[i].length - 1)) {
+      struct VMA* vma = &(p->vma[i]);
+      if(vma->used && (uint) addr == vma->addr && (uint) addr <= (uint)(vma->addr + vma->length - 1)) {
+        // Write memory back to file if needed
+        if(vma->flags & MAP_SHARED && !(vma->flags & MAP_ANON) && (vma->prot & PROT_WRITE)) {
+          resetfileoff(p->ofile[vma->fd]);
+          // cprintf("DEBUG munmap: %s %d %d %p %d\n", (char*) vma->addr, vma->fd, vma->length, p->ofile[vma->fd]);
+          if(filewrite(p->ofile[vma->fd], (char*) vma->addr, vma->length) < 0) {
+            return -1;
+          };
+        }
+
         for(; a <= last; a += PGSIZE) {
           // Removing page mapping
           pte = walkpgdir(p->pgdir, (char*)a, 0);
+          // cprintf("DEBUG: vma start: %p end: %p, a: %p last: %p\n", (void*)vma->addr, (void*)vma->addr + vma->length - 1,  (void*)a, (void*)last);
+
           if(!pte) {
             return -1;
           } else if((*pte & PTE_P) != 0) {
             pa = PTE_ADDR(*pte); // Extract the physical address from the PTE
+            // cprintf("DEBUG: Physical Address: %p\n", (void*)pa);
             if (pa == 0) {
               panic("munmap"); // This should not happen; panic if it does
             }
@@ -485,12 +548,14 @@ int munmap(void *addr, int length)
             *pte = 0; // Clear the page table entry to mark it as unused
           }
         }
+
+        // Disabling vma in process struct
+        vma->used = 0;
+        p->num_mmaps--;
       }
     }
     return 0;
 }
-
-
 //PAGEBREAK!
 // Blank page.
 //PAGEBREAK!

@@ -6,6 +6,7 @@
 #include "x86.h"
 #include "proc.h"
 #include "spinlock.h"
+#include "mmap.h"
 
 struct {
   struct spinlock lock;
@@ -200,6 +201,54 @@ fork(void)
     np->state = UNUSED;
     return -1;
   }
+
+  // Copying over mmaped memory based on MAP_SHARED | MAP_PRIVATE flags
+  for(int i = 0; i < 32; i++) {
+    np->vma[i].used = 0;
+  }
+  for(int i = 0; i < 32; i++) {
+    struct VMA* curproc_vma = curproc->vma;
+    if(curproc_vma[i].used) {
+      int a = PGROUNDDOWN((uint)curproc_vma[i].addr);
+      // int last = PGROUNDDOWN(curproc_vma[i].addr + curproc_vma[i].length);
+
+      for(; a < curproc_vma[i].addr + curproc_vma[i].length; a += PGSIZE) {
+        int parent_pa = PTE_ADDR(*(walkpgdir(curproc->pgdir, (char*) a, 0)));
+        if(curproc_vma[i].flags & MAP_SHARED) {  
+          // cprintf("Physical %p %p\n", parent_pa, P2V(parent_pa));
+          mappages(np->pgdir, (void*) a, PGSIZE, parent_pa, curproc_vma[i].prot | PTE_U);
+        } else if (curproc_vma[i].flags & MAP_PRIVATE) {
+          // ALlocate the memory
+          void* mem = kalloc();
+          if(mem == 0) {
+            return -1;
+          }
+          // cprintf("fork Allocating: va start: %p, end: %p pa start: %p end: %p\n", (void*) a, (void*) a + PGSIZE, (void*) V2P(mem), (void*) V2P(mem) + PGSIZE);
+          memmove(mem, (char*) P2V(parent_pa), PGSIZE);
+            if(mappages(np->pgdir, (void*) a, PGSIZE, V2P(mem), curproc_vma[i].prot | PTE_U) < 0) {
+              kfree(mem);
+              return -1; 
+            }
+        }
+      }
+      
+      // Finding free spot in vma list to place new vma
+      for(int i = 0; i < 32; i++) {
+        struct VMA* np_vma = np->vma;
+        if(np->vma[i].used == 0) {
+          np_vma->addr = (int) curproc_vma[i].addr;
+          np_vma->length = curproc_vma[i].length;
+          np_vma->prot = curproc_vma[i].prot;
+          np_vma->flags = curproc_vma[i].flags;
+          np_vma->fd = curproc_vma[i].fd;
+          np_vma->offset = 0;
+          np_vma->used = 1;
+          np->num_mmaps++;
+        }
+      }
+    }
+  }
+
   np->sz = curproc->sz;
   np->parent = curproc;
   *np->tf = *curproc->tf;
@@ -221,7 +270,6 @@ fork(void)
   np->state = RUNNABLE;
 
   release(&ptable.lock);
-
   return pid;
 }
 
@@ -232,8 +280,9 @@ void
 exit(void)
 {
   struct proc *curproc = myproc();
-  struct proc *p;
-  int fd;
+  struct proc* p;
+  int fd, a, last, pa;
+  pte_t *pte;
 
   if(curproc == initproc)
     panic("init exiting");
@@ -243,6 +292,43 @@ exit(void)
     if(curproc->ofile[fd]){
       fileclose(curproc->ofile[fd]);
       curproc->ofile[fd] = 0;
+    }
+  }
+
+  // Freeing all mmaps still in use and writing memory back to file if needed
+  for(int i = 0; i < 32; i++) {
+    struct VMA* vma = &(curproc->vma[i]);
+    if(vma->used) {
+      // Write memory back to file if needed
+      if(vma->flags & MAP_SHARED && !(vma->flags & MAP_ANON) && (vma->prot & PROT_WRITE)) {
+        resetfileoff(curproc->ofile[vma->fd]);
+        if(filewrite(curproc->ofile[vma->fd], (char*) vma->addr, vma->length) < 0) {
+          return;
+        };
+      }
+
+      a = PGROUNDDOWN((uint)vma->addr);
+      last = PGROUNDDOWN(((uint)vma->addr) + vma->length - 1);
+
+      for(; a <= last; a += PGSIZE) {
+        // Removing page mapping
+        pte = walkpgdir(curproc->pgdir, (char*)a, 0);
+
+        if((*pte & PTE_P) != 0) {
+          pa = PTE_ADDR(*pte); // Extract the physical address from the PTE
+          // cprintf("DEBUG: Physical Address: %p\n", (void*)pa);
+          if (pa == 0) {
+            panic("munmap"); // This should not happen; panic if it does
+          }
+          char *v = P2V(pa); // Map the physical address to a kernel virtual address
+          kfree(v); // Free the kernel memory associated with the page
+          *pte = 0; // Clear the page table entry to mark it as unused
+        }
+      }
+
+      // Disabling vma in process struct
+      vma->used = 0;
+      curproc->num_mmaps--;
     }
   }
 
@@ -279,7 +365,6 @@ wait(void)
   struct proc *p;
   int havekids, pid;
   struct proc *curproc = myproc();
-  
   acquire(&ptable.lock);
   for(;;){
     // Scan through table looking for exited children.

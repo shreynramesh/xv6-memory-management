@@ -40,9 +40,8 @@ struct VMA {
   int length  ; // end of vma after rounded up to page
   int prot; // protection
   int flags; // map shared or private
-  int fd; // file descriptor
   int offset; // offset into file, always = 0
-  struct file *pf; // pointer to file struct
+  int fd; // file descriptor
   int used; // present bit
 };
 
